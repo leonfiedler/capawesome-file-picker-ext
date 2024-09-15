@@ -116,6 +116,24 @@ public class FilePickerPlugin extends Plugin {
         }
     }
 
+    @PluginMethod
+    public void pickDirectory(PluginCall call) {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+            try {
+                Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+                intent.addCategory(Intent.CATEGORY_DEFAULT);
+
+                startActivityForResult(call, intent, "pickDirectoryResult");
+            } catch (Exception ex) {
+                String message = ex.getMessage();
+                Log.e(TAG, message);
+                call.reject(message);
+            }
+        } else {
+            call.reject("Picking a directory is not supported on this Android version.");
+        }
+    }
+
     @Nullable
     private String[] parseTypesOption(@Nullable JSArray types) {
         if (types == null) {
@@ -151,6 +169,46 @@ public class FilePickerPlugin extends Plugin {
                     break;
                 default:
                     call.reject(ERROR_PICK_FILE_FAILED);
+            }
+        } catch (Exception ex) {
+            String message = ex.getMessage();
+            Log.e(TAG, message);
+            call.reject(message);
+        }
+    }
+
+    @ActivityCallback
+    private void pickDirectoryResult(PluginCall call, ActivityResult result) {
+        try {
+            if (call == null) {
+                return;
+            }
+            int resultCode = result.getResultCode();
+            switch (resultCode) {
+                case Activity.RESULT_OK:
+                    Uri uri = null;
+                    if (result.getData() != null) {
+                        uri = result.getData().getData();
+                    }
+                    if (uri != null) {
+                        // Take persistable permissions
+                        final int takeFlags = result.getData().getFlags() &
+                                (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                        getContext().getContentResolver().takePersistableUriPermission(uri, takeFlags);
+
+                        // Return the directory URI or other relevant info to the caller
+                        JSObject callResult = new JSObject();
+                        callResult.put("uri", uri.toString());
+                        call.resolve(callResult);
+                    } else {
+                        call.reject("No directory selected.");
+                    }
+                    break;
+                case Activity.RESULT_CANCELED:
+                    call.reject("pickDirectory canceled.");
+                    break;
+                default:
+                    call.reject("pickDirectory failed.");
             }
         } catch (Exception ex) {
             String message = ex.getMessage();
