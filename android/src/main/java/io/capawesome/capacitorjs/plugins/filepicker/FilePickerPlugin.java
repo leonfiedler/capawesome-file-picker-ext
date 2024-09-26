@@ -1,268 +1,545 @@
-package io.capawesome.capacitorjs.plugins.filepicker;
+package com.capacitorjs.plugins.filesystem;
 
-import android.app.Activity;
+import android.Manifest;
+import android.content.ContentResolver;
 import android.content.Intent;
+import android.media.MediaScannerConnection;
 import android.net.Uri;
-import android.util.Log;
-import androidx.activity.result.ActivityResult;
-import androidx.annotation.Nullable;
+import android.os.Build;
+import android.os.Environment;
+import com.capacitorjs.plugins.filesystem.exceptions.CopyFailedException;
+import com.capacitorjs.plugins.filesystem.exceptions.DirectoryExistsException;
+import com.capacitorjs.plugins.filesystem.exceptions.DirectoryNotFoundException;
 import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Logger;
+import com.getcapacitor.PermissionState;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
-import com.getcapacitor.annotation.ActivityCallback;
 import com.getcapacitor.annotation.CapacitorPlugin;
-import java.util.ArrayList;
-import java.util.List;
+import com.getcapacitor.annotation.Permission;
+import com.getcapacitor.annotation.PermissionCallback;
+import com.getcapacitor.plugin.util.HttpRequestHandler;
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.attribute.BasicFileAttributes;
 import org.json.JSONException;
 
-@CapacitorPlugin(name = "FilePicker")
-public class FilePickerPlugin extends Plugin {
+@CapacitorPlugin(
+    name = "Filesystem",
+    permissions = {
+        @Permission(
+            strings = { Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.WRITE_EXTERNAL_STORAGE },
+            alias = "publicStorage"
+        )
+    }
+)
+public class FilesystemPlugin extends Plugin {
 
-    public static final String TAG = "FilePickerPlugin";
+    static final String PUBLIC_STORAGE = "publicStorage";
+    private Filesystem implementation;
 
-    public static final String ERROR_PICK_FILE_FAILED = "pickFiles failed.";
-    public static final String ERROR_PICK_FILE_CANCELED = "pickFiles canceled.";
-    private FilePicker implementation;
-
+    @Override
     public void load() {
-        implementation = new FilePicker(this.getBridge());
+        implementation = new Filesystem(getContext());
     }
 
-    @PluginMethod
-    public void convertHeicToJpeg(PluginCall call) {
-        call.unimplemented("Not implemented on Android.");
-    }
+    private static final String PERMISSION_DENIED_ERROR = "Unable to do file operation, user denied permission request";
 
     @PluginMethod
-    public void pickFiles(PluginCall call) {
-        try {
-            int limit = call.getInt("limit", 0);
-            JSArray types = call.getArray("types", null);
-            String[] parsedTypes = parseTypesOption(types);
+    public void readFile(PluginCall call) {
+        String path = call.getString("path");
+        String directory = getDirectoryParameter(call);
+        String encoding = call.getString("encoding");
 
-            Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
-            intent.setType("*/*");
-            intent.addCategory(Intent.CATEGORY_OPENABLE);
-            intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, limit == 0);
-            if (limit == 1 && parsedTypes != null && parsedTypes.length > 0) {
-                intent.putExtra(Intent.EXTRA_MIME_TYPES, parsedTypes);
-            }
-
-            startActivityForResult(call, intent, "pickFilesResult");
-        } catch (Exception ex) {
-            String message = ex.getMessage();
-            Log.e(TAG, message);
-            call.reject(message);
+        Charset charset = implementation.getEncoding(encoding);
+        if (encoding != null && charset == null) {
+            call.reject("Unsupported encoding provided: " + encoding);
+            return;
         }
-    }
 
-    @PluginMethod
-    public void pickImages(PluginCall call) {
-        try {
-            int limit = call.getInt("limit", 0);
-
-            Intent intent = new Intent(Intent.ACTION_PICK);
-            intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, limit == 0);
-            intent.setType("image/*");
-            intent.putExtra("multi-pick", limit == 0);
-            intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[] { "image/*" });
-
-            startActivityForResult(call, intent, "pickFilesResult");
-        } catch (Exception ex) {
-            String message = ex.getMessage();
-            Log.e(TAG, message);
-            call.reject(message);
-        }
-    }
-
-    @PluginMethod
-    public void pickMedia(PluginCall call) {
-        try {
-            int limit = call.getInt("limit", 0);
-
-            Intent intent = new Intent(Intent.ACTION_PICK);
-            intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, limit == 0);
-            intent.setType("*/*");
-            intent.putExtra("multi-pick", limit == 0);
-            intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[] { "image/*", "video/*" });
-
-            startActivityForResult(call, intent, "pickFilesResult");
-        } catch (Exception ex) {
-            String message = ex.getMessage();
-            Log.e(TAG, message);
-            call.reject(message);
-        }
-    }
-
-    @PluginMethod
-    public void pickVideos(PluginCall call) {
-        try {
-            int limit = call.getInt("limit", 0);
-
-            Intent intent = new Intent(Intent.ACTION_PICK);
-            intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, limit == 0);
-            intent.setType("video/*");
-            intent.putExtra("multi-pick", limit == 0);
-            intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[] { "video/*" });
-
-            startActivityForResult(call, intent, "pickFilesResult");
-        } catch (Exception ex) {
-            String message = ex.getMessage();
-            Log.e(TAG, message);
-            call.reject(message);
-        }
-    }
-
-    @PluginMethod
-    public void pickDirectory(PluginCall call) {
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+        if (isPublicDirectory(directory) && !isStoragePermissionGranted()) {
+            requestAllPermissions(call, "permissionCallback");
+        } else {
             try {
-                Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
-                intent.addCategory(Intent.CATEGORY_DEFAULT);
-
-                startActivityForResult(call, intent, "pickDirectoryResult");
-            } catch (Exception ex) {
-                String message = ex.getMessage();
-                Log.e(TAG, message);
-                call.reject(message);
+                String dataStr = implementation.readFile(path, directory, charset);
+                JSObject ret = new JSObject();
+                ret.putOpt("data", dataStr);
+                call.resolve(ret);
+            } catch (FileNotFoundException ex) {
+                call.reject("File does not exist", ex);
+            } catch (IOException ex) {
+                call.reject("Unable to read file", ex);
+            } catch (JSONException ex) {
+                call.reject("Unable to return value for reading file", ex);
             }
-        } else {
-            call.reject("Picking a directory is not supported on this Android version.");
         }
     }
 
-    @Nullable
-    private String[] parseTypesOption(@Nullable JSArray types) {
-        if (types == null) {
-            return null;
-        }
-        try {
-            List<String> typesList = types.toList();
-            if (typesList.contains("text/csv")) {
-                typesList.add("text/comma-separated-values");
-            }
-            return typesList.toArray(new String[0]);
-        } catch (JSONException exception) {
-            Logger.error("parseTypesOption failed.", exception);
-            return null;
-        }
-    }
+    @PluginMethod
+    public void writeFile(PluginCall call) {
+        String path = call.getString("path");
+        String data = call.getString("data");
+        Boolean recursive = call.getBoolean("recursive", false);
 
-    @ActivityCallback
-    private void pickFilesResult(PluginCall call, ActivityResult result) {
-        try {
-            if (call == null) {
-                return;
-            }
-            boolean readData = call.getBoolean("readData", false);
-            int resultCode = result.getResultCode();
-            switch (resultCode) {
-                case Activity.RESULT_OK:
-                    JSObject callResult = createPickFilesResult(result.getData(), readData);
-                    call.resolve(callResult);
-                    break;
-                case Activity.RESULT_CANCELED:
-                    call.reject(ERROR_PICK_FILE_CANCELED);
-                    break;
-                default:
-                    call.reject(ERROR_PICK_FILE_FAILED);
-            }
-        } catch (Exception ex) {
-            String message = ex.getMessage();
-            Log.e(TAG, message);
-            call.reject(message);
+        if (path == null) {
+            Logger.error(getLogTag(), "No path or filename retrieved from call", null);
+            call.reject("NO_PATH");
+            return;
         }
-    }
 
-    @ActivityCallback
-    private void pickDirectoryResult(PluginCall call, ActivityResult result) {
-        try {
-            if (call == null) {
-                return;
-            }
-            int resultCode = result.getResultCode();
-            switch (resultCode) {
-                case Activity.RESULT_OK:
-                    Uri uri = null;
-                    if (result.getData() != null) {
-                        uri = result.getData().getData();
-                    }
-                    if (uri != null) {
-                        // Take persistable permissions
-                        final int takeFlags = result.getData().getFlags() &
-                                (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
-                        getContext().getContentResolver().takePersistableUriPermission(uri, takeFlags);
-
-                        // Return the directory URI or other relevant info to the caller
-                        JSObject callResult = new JSObject();
-                        callResult.put("uri", uri.toString());
-                        call.resolve(callResult);
-                    } else {
-                        call.reject("No directory selected.");
-                    }
-                    break;
-                case Activity.RESULT_CANCELED:
-                    call.reject("pickDirectory canceled.");
-                    break;
-                default:
-                    call.reject("pickDirectory failed.");
-            }
-        } catch (Exception ex) {
-            String message = ex.getMessage();
-            Log.e(TAG, message);
-            call.reject(message);
-        }
-    }
-
-    private JSObject createPickFilesResult(@Nullable Intent data, boolean readData) {
-        JSObject callResult = new JSObject();
-        List<JSObject> filesResultList = new ArrayList<>();
         if (data == null) {
-            callResult.put("files", JSArray.from(filesResultList));
-            return callResult;
+            Logger.error(getLogTag(), "No data retrieved from call", null);
+            call.reject("NO_DATA");
+            return;
         }
-        List<Uri> uris = new ArrayList<>();
-        if (data.getClipData() == null) {
-            Uri uri = data.getData();
-            uris.add(uri);
+
+        String directory = getDirectoryParameter(call);
+        if (directory != null) {
+            if (isPublicDirectory(directory) && !isStoragePermissionGranted()) {
+                requestAllPermissions(call, "permissionCallback");
+            } else {
+                // create directory because it might not exist
+                File androidDir = implementation.getDirectory(directory);
+                if (androidDir != null) {
+                    if (androidDir.exists() || androidDir.mkdirs()) {
+                        // path might include directories as well
+                        File fileObject = new File(androidDir, path);
+                        if (fileObject.getParentFile().exists() || (recursive && fileObject.getParentFile().mkdirs())) {
+                            saveFile(call, fileObject, data);
+                        } else {
+                            call.reject("Parent folder doesn't exist");
+                        }
+                    } else {
+                        Logger.error(getLogTag(), "Not able to create '" + directory + "'!", null);
+                        call.reject("NOT_CREATED_DIR");
+                    }
+                } else {
+                    Logger.error(getLogTag(), "Directory ID '" + directory + "' is not supported by plugin", null);
+                    call.reject("INVALID_DIR");
+                }
+            }
         } else {
-            for (int i = 0; i < data.getClipData().getItemCount(); i++) {
-                Uri uri = data.getClipData().getItemAt(i).getUri();
-                uris.add(uri);
+            // check file:// or no scheme uris
+            Uri u = Uri.parse(path);
+            if (u.getScheme() == null || u.getScheme().equals("file")) {
+                File fileObject = new File(u.getPath());
+                // do not know where the file is being store so checking the permission to be secure
+                // TODO to prevent permission checking we need a property from the call
+                if (!isStoragePermissionGranted()) {
+                    requestAllPermissions(call, "permissionCallback");
+                } else {
+                    if (
+                        fileObject.getParentFile() == null ||
+                        fileObject.getParentFile().exists() ||
+                        (recursive && fileObject.getParentFile().mkdirs())
+                    ) {
+                        saveFile(call, fileObject, data);
+                    } else {
+                        call.reject("Parent folder doesn't exist");
+                    }
+                }
+            } else {
+                call.reject(u.getScheme() + " scheme not supported");
             }
         }
-        for (int i = 0; i < uris.size(); i++) {
-            Uri uri = uris.get(i);
-            if (uri == null) {
-                continue;
-            }
-            JSObject fileResult = new JSObject();
-            if (readData) {
-                fileResult.put("data", implementation.getDataFromUri(uri));
-            }
-            Long duration = implementation.getDurationFromUri(uri);
-            if (duration != null) {
-                fileResult.put("duration", duration);
-            }
-            FileResolution resolution = implementation.getHeightAndWidthFromUri(uri);
-            if (resolution != null) {
-                fileResult.put("height", resolution.height);
-                fileResult.put("width", resolution.width);
-            }
-            fileResult.put("mimeType", implementation.getMimeTypeFromUri(uri));
-            Long modifiedAt = implementation.getModifiedAtFromUri(uri);
-            if (modifiedAt != null) {
-                fileResult.put("modifiedAt", modifiedAt);
-            }
-            fileResult.put("name", implementation.getNameFromUri(uri));
-            fileResult.put("path", implementation.getPathFromUri(uri));
-            fileResult.put("size", implementation.getSizeFromUri(uri));
-            filesResultList.add(fileResult);
+    }
+
+    private void saveFile(PluginCall call, File file, String data) {
+        String encoding = call.getString("encoding");
+        boolean append = call.getBoolean("append", false);
+
+        Charset charset = implementation.getEncoding(encoding);
+        if (encoding != null && charset == null) {
+            call.reject("Unsupported encoding provided: " + encoding);
+            return;
         }
-        callResult.put("files", JSArray.from(filesResultList.toArray()));
-        return callResult;
+
+        try {
+            implementation.saveFile(file, data, charset, append);
+            // update mediaStore index only if file was written to external storage
+            if (isPublicDirectory(getDirectoryParameter(call))) {
+                MediaScannerConnection.scanFile(getContext(), new String[] { file.getAbsolutePath() }, null, null);
+            }
+            Logger.debug(getLogTag(), "File '" + file.getAbsolutePath() + "' saved!");
+            JSObject result = new JSObject();
+            result.put("uri", Uri.fromFile(file).toString());
+            call.resolve(result);
+        } catch (IOException ex) {
+            Logger.error(
+                getLogTag(),
+                "Creating file '" + file.getPath() + "' with charset '" + charset + "' failed. Error: " + ex.getMessage(),
+                ex
+            );
+            call.reject("FILE_NOTCREATED");
+        } catch (IllegalArgumentException ex) {
+            call.reject("The supplied data is not valid base64 content.");
+        }
+    }
+
+    @PluginMethod
+    public void appendFile(PluginCall call) {
+        try {
+            call.getData().putOpt("append", true);
+        } catch (JSONException ex) {}
+
+        this.writeFile(call);
+    }
+
+    @PluginMethod
+    public void deleteFile(PluginCall call) {
+        String file = call.getString("path");
+        String directory = getDirectoryParameter(call);
+        if (isPublicDirectory(directory) && !isStoragePermissionGranted()) {
+            requestAllPermissions(call, "permissionCallback");
+        } else {
+            try {
+                boolean deleted = implementation.deleteFile(file, directory);
+                if (!deleted) {
+                    call.reject("Unable to delete file");
+                } else {
+                    call.resolve();
+                }
+            } catch (FileNotFoundException ex) {
+                call.reject(ex.getMessage());
+            }
+        }
+    }
+
+    @PluginMethod
+    public void mkdir(PluginCall call) {
+        String path = call.getString("path");
+        String directory = getDirectoryParameter(call);
+        boolean recursive = call.getBoolean("recursive", false).booleanValue();
+        if (isPublicDirectory(directory) && !isStoragePermissionGranted()) {
+            requestAllPermissions(call, "permissionCallback");
+        } else {
+            try {
+                boolean created = implementation.mkdir(path, directory, recursive);
+                if (!created) {
+                    call.reject("Unable to create directory, unknown reason");
+                } else {
+                    call.resolve();
+                }
+            } catch (DirectoryExistsException ex) {
+                call.reject(ex.getMessage());
+            }
+        }
+    }
+
+    @PluginMethod
+    public void rmdir(PluginCall call) {
+        String path = call.getString("path");
+        String directory = getDirectoryParameter(call);
+        Boolean recursive = call.getBoolean("recursive", false);
+
+        File fileObject = implementation.getFileObject(path, directory);
+
+        if (isPublicDirectory(directory) && !isStoragePermissionGranted()) {
+            requestAllPermissions(call, "permissionCallback");
+        } else {
+            if (!fileObject.exists()) {
+                call.reject("Directory does not exist");
+                return;
+            }
+
+            if (fileObject.isDirectory() && fileObject.listFiles().length != 0 && !recursive) {
+                call.reject("Directory is not empty");
+                return;
+            }
+
+            boolean deleted = false;
+
+            try {
+                implementation.deleteRecursively(fileObject);
+                deleted = true;
+            } catch (IOException ignored) {}
+
+            if (!deleted) {
+                call.reject("Unable to delete directory, unknown reason");
+            } else {
+                call.resolve();
+            }
+        }
+    }
+
+    @PluginMethod
+    public void readdir(PluginCall call) {
+        String path = call.getString("path");
+        String directory = getDirectoryParameter(call);
+
+        if (isPublicDirectory(directory) && !isStoragePermissionGranted()) {
+            requestAllPermissions(call, "permissionCallback");
+        } else {
+            try {
+                File[] files = implementation.readdir(path, directory);
+                JSArray filesArray = new JSArray();
+                if (files != null) {
+                    for (var i = 0; i < files.length; i++) {
+                        File fileObject = files[i];
+                        JSObject data = new JSObject();
+                        data.put("name", fileObject.getName());
+                        data.put("type", fileObject.isDirectory() ? "directory" : "file");
+                        data.put("size", fileObject.length());
+                        data.put("mtime", fileObject.lastModified());
+                        data.put("uri", Uri.fromFile(fileObject).toString());
+
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            try {
+                                BasicFileAttributes attr = Files.readAttributes(fileObject.toPath(), BasicFileAttributes.class);
+
+                                // use whichever is the oldest between creationTime and lastAccessTime
+                                if (attr.creationTime().toMillis() < attr.lastAccessTime().toMillis()) {
+                                    data.put("ctime", attr.creationTime().toMillis());
+                                } else {
+                                    data.put("ctime", attr.lastAccessTime().toMillis());
+                                }
+                            } catch (Exception ex) {}
+                        } else {
+                            data.put("ctime", null);
+                        }
+                        filesArray.put(data);
+                    }
+
+                    JSObject ret = new JSObject();
+                    ret.put("files", filesArray);
+                    call.resolve(ret);
+                } else {
+                    call.reject("Unable to read directory");
+                }
+            } catch (DirectoryNotFoundException ex) {
+                call.reject(ex.getMessage());
+            }
+        }
+    }
+
+    @PluginMethod
+    public void getUri(PluginCall call) {
+        String path = call.getString("path");
+        String directory = getDirectoryParameter(call);
+
+        File fileObject = implementation.getFileObject(path, directory);
+
+        if (isPublicDirectory(directory) && !isStoragePermissionGranted()) {
+            requestAllPermissions(call, "permissionCallback");
+        } else {
+            JSObject data = new JSObject();
+            data.put("uri", Uri.fromFile(fileObject).toString());
+            call.resolve(data);
+        }
+    }
+
+    @PluginMethod
+    public void stat(PluginCall call) {
+        String path = call.getString("path");
+        String directory = getDirectoryParameter(call);
+
+        File fileObject = implementation.getFileObject(path, directory);
+
+        if (isPublicDirectory(directory) && !isStoragePermissionGranted()) {
+            requestAllPermissions(call, "permissionCallback");
+        } else {
+            if (!fileObject.exists()) {
+                call.reject("File does not exist");
+                return;
+            }
+
+            JSObject data = new JSObject();
+            data.put("type", fileObject.isDirectory() ? "directory" : "file");
+            data.put("size", fileObject.length());
+            data.put("mtime", fileObject.lastModified());
+            data.put("uri", Uri.fromFile(fileObject).toString());
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                try {
+                    BasicFileAttributes attr = Files.readAttributes(fileObject.toPath(), BasicFileAttributes.class);
+
+                    // use whichever is the oldest between creationTime and lastAccessTime
+                    if (attr.creationTime().toMillis() < attr.lastAccessTime().toMillis()) {
+                        data.put("ctime", attr.creationTime().toMillis());
+                    } else {
+                        data.put("ctime", attr.lastAccessTime().toMillis());
+                    }
+                } catch (Exception ex) {}
+            } else {
+                data.put("ctime", null);
+            }
+
+            call.resolve(data);
+        }
+    }
+
+    @PluginMethod
+    public void rename(PluginCall call) {
+        this._copy(call, true);
+    }
+
+    @PluginMethod
+    public void copy(PluginCall call) {
+        this._copy(call, false);
+    }
+
+    @PluginMethod
+    public void downloadFile(PluginCall call) {
+        try {
+            String directory = call.getString("directory", Environment.DIRECTORY_DOWNLOADS);
+
+            if (isPublicDirectory(directory) && !isStoragePermissionGranted()) {
+                requestAllPermissions(call, "permissionCallback");
+            } else {
+                HttpRequestHandler.ProgressEmitter emitter = (bytes, contentLength) -> {
+                    JSObject ret = new JSObject();
+                    ret.put("url", call.getString("url"));
+                    ret.put("bytes", bytes);
+                    ret.put("contentLength", contentLength);
+
+                    notifyListeners("progress", ret);
+                };
+
+                JSObject response = implementation.downloadFile(call, bridge, emitter);
+                // update mediaStore index only if file was written to external storage
+                if (isPublicDirectory(directory)) {
+                    MediaScannerConnection.scanFile(getContext(), new String[] { response.getString("path") }, null, null);
+                }
+                call.resolve(response);
+            }
+        } catch (Exception ex) {
+            call.reject("Error downloading file: " + ex.getLocalizedMessage(), ex);
+        }
+    }
+
+    private void _copy(PluginCall call, Boolean doRename) {
+        String from = call.getString("from");
+        String to = call.getString("to");
+        String directory = call.getString("directory");
+        String toDirectory = call.getString("toDirectory");
+
+        if (from == null || from.isEmpty() || to == null || to.isEmpty()) {
+            call.reject("Both to and from must be provided");
+            return;
+        }
+        if (isPublicDirectory(directory) || isPublicDirectory(toDirectory)) {
+            if (!isStoragePermissionGranted()) {
+                requestAllPermissions(call, "permissionCallback");
+                return;
+            }
+        }
+        try {
+            File file = implementation.copy(from, directory, to, toDirectory, doRename);
+            if (!doRename) {
+                JSObject result = new JSObject();
+                result.put("uri", Uri.fromFile(file).toString());
+                call.resolve(result);
+            } else {
+                call.resolve();
+            }
+        } catch (CopyFailedException ex) {
+            call.reject(ex.getMessage());
+        } catch (IOException ex) {
+            call.reject("Unable to perform action: " + ex.getLocalizedMessage());
+        }
+    }
+
+    @PluginMethod
+    public void checkPermissions(PluginCall call) {
+        if (isStoragePermissionGranted()) {
+            JSObject permissionsResultJSON = new JSObject();
+            permissionsResultJSON.put(PUBLIC_STORAGE, "granted");
+            call.resolve(permissionsResultJSON);
+        } else {
+            super.checkPermissions(call);
+        }
+    }
+
+    @PluginMethod
+    public void requestPermissions(PluginCall call) {
+        if (isStoragePermissionGranted()) {
+            JSObject permissionsResultJSON = new JSObject();
+            permissionsResultJSON.put(PUBLIC_STORAGE, "granted");
+            call.resolve(permissionsResultJSON);
+        } else {
+            super.requestPermissions(call);
+        }
+    }
+
+    @PermissionCallback
+    private void permissionCallback(PluginCall call) {
+        if (!isStoragePermissionGranted()) {
+            Logger.debug(getLogTag(), "User denied storage permission");
+            call.reject(PERMISSION_DENIED_ERROR);
+            return;
+        }
+
+        switch (call.getMethodName()) {
+            case "appendFile":
+            case "writeFile":
+                writeFile(call);
+                break;
+            case "deleteFile":
+                deleteFile(call);
+                break;
+            case "mkdir":
+                mkdir(call);
+                break;
+            case "rmdir":
+                rmdir(call);
+                break;
+            case "rename":
+                rename(call);
+                break;
+            case "copy":
+                copy(call);
+                break;
+            case "readFile":
+                readFile(call);
+                break;
+            case "readdir":
+                readdir(call);
+                break;
+            case "getUri":
+                getUri(call);
+                break;
+            case "stat":
+                stat(call);
+                break;
+            case "downloadFile":
+                downloadFile(call);
+                break;
+        }
+    }
+
+
+
+
+
+    /**
+     * Checks the the given permission is granted or not
+     * @return Returns true if the app is running on Android 30 or newer or if the permission is already granted
+     * or false if it is denied.
+     */
+    private boolean isStoragePermissionGranted() {
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.R || getPermissionState(PUBLIC_STORAGE) == PermissionState.GRANTED;
+    }
+
+    /**
+     * Reads the directory parameter from the plugin call
+     * @param call the plugin call
+     */
+    private String getDirectoryParameter(PluginCall call) {
+        return call.getString("directory");
+    }
+
+    /**
+     * True if the given directory string is a public storage directory, which is accessible by the user or other apps.
+     * @param directory the directory string.
+     */
+    private boolean isPublicDirectory(String directory) {
+        return "DOCUMENTS".equals(directory) || "EXTERNAL_STORAGE".equals(directory);
     }
 }
